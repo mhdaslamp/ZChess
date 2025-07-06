@@ -44,14 +44,22 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
+            // Add logo here
+            Image.asset(
+              'lib/assets/logo.png', // Replace with your image path
+              height:70,       // Adjust size as needed
+            ),
+            SizedBox(height: 5),
+
             Text(
-              'Welcome to Lichess Client',
+              'ZChess',
               style: Theme.of(context).textTheme.displaySmall?.copyWith(
-                fontSize: 24, // You can adjust this size as needed
+                fontSize: 30,
                 fontWeight: FontWeight.bold,
               ),
             ),
-            SizedBox(height: 40),
+            SizedBox(height: 100),
+
             isLoading
                 ? CircularProgressIndicator()
                 : ElevatedButton(
@@ -66,4 +74,5 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
       ),
     );
   }
+
 }
