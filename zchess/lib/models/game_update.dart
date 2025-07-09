@@ -6,7 +6,7 @@ class GameUpdate {
   final String? opponentName;
   final String? opponentRating;
   final String? myColor;
-  final String? fen;
+  final String fen; // <--- Make sure it's String, not String?
   final String? lastMove;
   final bool gameOver;
 
@@ -18,8 +18,8 @@ class GameUpdate {
     this.opponentName,
     this.opponentRating,
     this.myColor,
-    this.fen,
+    required this.fen, // <--- Make sure it's required
     this.lastMove,
-    this.gameOver = false,
+    required this.gameOver,
   });
 }

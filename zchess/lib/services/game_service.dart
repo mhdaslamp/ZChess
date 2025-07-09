@@ -1,38 +1,47 @@
 import 'dart:convert';
 import 'dart:async';
 import 'package:http/http.dart' as http;
-import '../models/game_update.dart';
+
+import 'package:chess/chess.dart' as chess_lib;
+import '../models/game_update.dart'; // Make sure this path is correct
+import 'package:flutter/foundation.dart';
 
 class GameService {
   final String accessToken;
   final String username;
+
   Function(GameUpdate)? onGameUpdate;
 
   http.Client? _eventClient;
   http.Client? _gameClient;
   String? _gameId;
-  String? _playerColor;
+  String? _playerColor; // 'white' or 'black'
   String? _opponentName;
   String? _opponentRating;
   Timer? _pingTimer;
   Timer? _seekTimeout;
-  List<String> moves = [];
+  List<String> moves = []; // Keep track of move history in SAN for internal state
   bool _disposed = false;
+  late chess_lib.Chess _chess; // The main chess game state
+  int _reconnectAttempts = 0;
 
-  GameService({required this.accessToken, required this.username});
+  GameService({required this.accessToken, required this.username}) {
+    _chess = chess_lib.Chess(); // Initialize the chess board once
+  }
 
   Future<void> startGame() async {
     try {
       await _createSeek();
-      _connectToEventStream();
+      _listenToEventStream();
 
-      _seekTimeout = Timer(const Duration(minutes: 2), () {
+      _seekTimeout = Timer(const Duration(minutes: 5), () {
         if (_gameId == null && !_disposed) {
           onGameUpdate?.call(GameUpdate(
             status: 'No opponent found. Try again.',
             isMyTurn: false,
-            moves: moves,
+            moves: [],
             gameOver: true,
+            fen: _chess.fen, // _chess.fen is a runtime value, so GameUpdate constructor must not be const
           ));
           dispose();
         }
@@ -49,15 +58,15 @@ class GameService {
         'Authorization': 'Bearer $accessToken',
         'Content-Type': 'application/x-www-form-urlencoded',
       },
-      body: 'rated=false&clock.limit=300&clock.increment=3&variant=standard&color=random',
+      body: 'rated=false&clock.limit=300&clock.increment=3&variant=standard&color=white',
     );
 
-    if (response.statusCode != 200) {
-      throw Exception('Failed to create seek: ${response.body}');
+    if (response.statusCode != 200 && response.statusCode != 204) {
+      throw Exception('Failed to create seek: ${response.statusCode} - ${response.body}');
     }
   }
 
-  void _connectToEventStream() {
+  void _listenToEventStream() {
     _eventClient?.close();
     _eventClient = http.Client();
 
@@ -78,33 +87,29 @@ class GameService {
         if (line.trim().isEmpty) return;
         try {
           final event = json.decode(line);
-          switch (event['type']) {
-            case 'gameStart':
-              _handleGameStart(event['game']);
-              break;
-            case 'gameFinish':
-              _handleGameFinish();
-              break;
-            case 'challenge':
-              _handleChallenge(event['challenge']);
-              break;
+          if (event['type'] == 'gameStart') {
+            _gameId = event['game']['id'];
+            _playerColor = event['game']['color'].toString();
+            _connectToGameStream();
+          } else if (event['type'] == 'gameFinish') {
+            _gameId = event['game']['id'];
+            _handleGameFinish(event['game']['status'].toString());
           }
         } catch (e) {
           _handleError('Error processing event: $e');
         }
-      }, onError: (error) => _handleError('Event stream error: $error'));
-    }).catchError((e) => _handleError('Failed to connect to event stream: $e'));
-  }
-
-  void _handleGameStart(Map<String, dynamic> game) {
-    _seekTimeout?.cancel();
-    _gameId = game['id'];
-    _playerColor = game['color'] == 'white' ? 'white' : 'black';
-    _connectToGameStream();
+      }, onError: (error) {
+        _handleStreamError('Event stream error', error);
+      }, onDone: () {
+        _handleStreamDisconnect('Event stream closed');
+      });
+    }).catchError((e) {
+      _handleStreamError('Failed to connect to event stream', e);
+    });
   }
 
   void _connectToGameStream() {
-    if (_gameId == null) return;
+    if (_gameId == null || _disposed) return;
 
     _gameClient?.close();
     _gameClient = http.Client();
@@ -119,11 +124,8 @@ class GameService {
     });
 
     _gameClient!.send(request).then((response) {
-      // Start ping timer to maintain connection
       _pingTimer?.cancel();
-      _pingTimer = Timer.periodic(const Duration(seconds: 20), (_) {
-        // Keep-alive ping
-      });
+      _pingTimer = Timer.periodic(const Duration(seconds: 20), (_) {});
 
       response.stream
           .transform(utf8.decoder)
@@ -131,96 +133,221 @@ class GameService {
           .listen((line) {
         if (line.trim().isEmpty) return;
         try {
-          _handleGameEvent(json.decode(line));
+          _handleGameMessage(line);
         } catch (e) {
           _handleError('Error processing game event: $e');
         }
-      }, onError: (error) => _handleError('Game stream error: $error'));
-    }).catchError((e) => _handleError('Failed to connect to game stream: $e'));
+      }, onError: (error) {
+        _handleStreamError('Game stream error', error);
+      }, onDone: () {
+        _handleStreamDisconnect('Game stream closed');
+      });
+
+      _reconnectAttempts = 0;
+    }).catchError((e) {
+      _handleStreamError('Failed to connect to game stream', e);
+    });
   }
 
-  void _handleGameEvent(Map<String, dynamic> event) {
+  void _handleGameMessage(String message) {
     try {
-      switch (event['type']) {
-        case 'gameFull':
-          final white = event['white'];
-          final black = event['black'];
-          final state = event['state'];
+      final data = json.decode(message);
 
-          moves = state['moves']?.split(' ') ?? [];
-          final isWhite = _playerColor == 'white';
+      if (data['type'] == 'gameFull') {
+        final white = data['white'] ?? {};
+        final black = data['black'] ?? {};
+        final state = data['state'] ?? {};
 
-          _opponentName = isWhite ? black['name'] : white['name'];
-          _opponentRating = isWhite
-              ? black['rating']?.toString()
-              : white['rating']?.toString();
+        moves = (state['moves']?.toString().split(' ') ?? []).where((s) => s.isNotEmpty).toList();
+        final isWhitePlayer = _playerColor == 'white';
 
-          onGameUpdate?.call(GameUpdate(
-            gameId: _gameId,
-            status: 'Game started',
-            isMyTurn: _isMyTurn(),
-            moves: moves,
-            opponentName: _opponentName,
-            opponentRating: _opponentRating,
-            myColor: _playerColor,
-            fen: state['fen'],
-            lastMove: moves.isNotEmpty ? moves.last : null,
-            gameOver: state['status'] != 'started',
-          ));
-          break;
+        _opponentName = (isWhitePlayer ? black['name'] : white['name'])?.toString();
+        _opponentRating = (isWhitePlayer ? black['rating'] : white['rating'])?.toString();
 
-        case 'gameState':
-          moves = event['moves']?.split(' ') ?? [];
-          onGameUpdate?.call(GameUpdate(
-            gameId: _gameId,
-            status: event['status'] ?? 'Game in progress',
-            isMyTurn: _isMyTurn(),
-            moves: moves,
-            fen: event['fen'],
-            lastMove: moves.isNotEmpty ? moves.last : null,
-            opponentName: _opponentName,
-            opponentRating: _opponentRating,
-            myColor: _playerColor,
-            gameOver: event['status'] != 'started',
-          ));
-          break;
+        final fen = state['fen']?.toString() ?? _chess.fen;
+        _updateChessState(fen);
 
-        case 'chatLine':
-        // Handle chat messages if needed
-          break;
+        onGameUpdate?.call(GameUpdate(
+          gameId: _gameId,
+          status: 'Game started',
+          isMyTurn: _isMyTurn(),
+          moves: moves,
+          opponentName: _opponentName,
+          opponentRating: _opponentRating,
+          myColor: _playerColor,
+          fen: fen,
+          lastMove: moves.isNotEmpty ? moves.last : null,
+          gameOver: state['status']?.toString() != 'started',
+        ));
+      } else if (data['type'] == 'gameState') {
+        final String movesString = data['moves']?.toString() ?? '';
+        moves = movesString.split(' ').where((s) => s.isNotEmpty).toList();
+
+        final fen = data['fen']?.toString() ?? _chess.fen;
+        _updateChessState(fen);
+
+        onGameUpdate?.call(GameUpdate(
+          gameId: _gameId,
+          status: (data['status']?.toString() ?? 'Game in progress'),
+          isMyTurn: _isMyTurn(),
+          moves: moves,
+          fen: fen,
+          lastMove: moves.isNotEmpty ? moves.last : null,
+          opponentName: _opponentName,
+          opponentRating: _opponentRating,
+          myColor: _playerColor,
+          gameOver: data['status']?.toString() != 'started',
+        ));
+      } else if (data['type'] == 'gameFinish') {
+        _handleGameFinish(data['status']?.toString() ?? 'unknown');
       }
     } catch (e) {
-      _handleError('Error processing game event: $e');
+      _handleError('Error processing game message: $e');
+    }
+  }
+
+  void _handleGameFinish(String status) {
+    onGameUpdate?.call(GameUpdate(
+      status: 'Game finished: $status',
+      isMyTurn: false,
+      moves: moves,
+      gameOver: true,
+      fen: _chess.fen,
+    ));
+    dispose();
+  }
+
+  void _handleStreamError(String message, dynamic error) {
+    _handleError('$message: ${error.toString()}');
+    if (!_disposed && _gameId != null && _reconnectAttempts < 3) {
+      _scheduleReconnect();
+    } else if (_gameId == null) {
+      onGameUpdate?.call(GameUpdate(
+        status: message,
+        isMyTurn: false,
+        gameOver: true,
+        moves: [],
+        fen: _chess.fen,
+      ));
+      dispose();
+    }
+  }
+
+  void _handleStreamDisconnect(String message) {
+    _handleError(message);
+    if (!_disposed && _gameId != null && _reconnectAttempts < 3) {
+      _scheduleReconnect();
+    } else if (_gameId == null) {
+      onGameUpdate?.call(GameUpdate(
+        status: message,
+        isMyTurn: false,
+        gameOver: true,
+        moves: [],
+        fen: _chess.fen,
+      ));
+      dispose();
+    }
+  }
+
+  void _scheduleReconnect() {
+    if (_reconnectAttempts >= 3 || _disposed) {
+      _handleError('Max reconnect attempts reached. Please restart.');
+      onGameUpdate?.call(GameUpdate(
+        status: 'Connection lost. Restart app.',
+        gameOver: true,
+        isMyTurn: false,
+        moves: [],
+        fen: _chess.fen,
+      ));
+      dispose();
+      return;
+    }
+    _reconnectAttempts++;
+
+    Timer(const Duration(seconds: 2 ), () {
+      if (_gameId == null) {
+        _listenToEventStream();
+      } else {
+        _connectToGameStream();
+      }
+    });
+  }
+
+  void _updateChessState(String fen) {
+    try {
+      _chess.load(fen);
+    } catch (e) {
+      _handleError('Failed to load chess state from FEN: $e');
+      _chess.reset();
     }
   }
 
   bool _isMyTurn() {
     if (_playerColor == null) return false;
-    return (_playerColor == 'white')
-        ? moves.length % 2 == 0
-        : moves.length % 2 == 1;
+    final chess_lib.Color currentTurn = _chess.turn;
+    if (_playerColor == 'white' && currentTurn == chess_lib.Color.WHITE) {
+      return true;
+    } else if (_playerColor == 'black' && currentTurn == chess_lib.Color.BLACK) {
+      return true;
+    }
+    return false;
   }
 
-  Future<void> makeMove(String move) async {
+  // This method is primarily for UI validation before sending
+  // It checks if a move from 'from' to 'to' is valid.
+  bool isValidMove(String fromSquare, String toSquare, {String? promotion}) {
+    final tempChess = chess_lib.Chess.fromFEN(_chess.fen);
+    try {
+      // Prepare the move in UCI format
+      String uciMove = fromSquare.toLowerCase() + toSquare.toLowerCase();
+      if (promotion != null) {
+        uciMove += promotion.toLowerCase();
+      }
+
+      // Attempt the move and return the result
+      return tempChess.move(uciMove);
+    } catch (e) {
+      print('Local move validation error: $e');
+      return false;
+    }
+  }
+  Future<bool> makeMove(String from, String to, String? promotion) async {
     if (_gameId == null) {
       _handleError('Not connected to game');
-      return;
+      return false;
+    }
+
+    if (!_isMyTurn()) {
+      _handleError('It\'s not your turn.');
+      return false;
     }
 
     try {
+      // Convert to UCI format (e2e4 or e7e8q for promotion)
+      String uciMove = from.toLowerCase() + to.toLowerCase();
+      if (promotion != null) {
+        uciMove += promotion.toLowerCase();
+      }
+
+      debugPrint('Sending UCI move to server: $uciMove');
+
       final response = await http.post(
-        Uri.parse('https://lichess.org/api/board/game/$_gameId/move/$move'),
+        Uri.parse('https://lichess.org/api/board/game/$_gameId/move/$uciMove'),
         headers: {'Authorization': 'Bearer $accessToken'},
       );
 
       if (response.statusCode != 200) {
-        _handleError('Move failed: ${response.body}');
+        final error = jsonDecode(response.body)['error'] ?? 'Unknown error';
+        debugPrint('Server rejected move: $error');
+        return false;
       }
-    } catch (e) {
-      _handleError('Move failed: $e');
-    }
-  }
 
+      return true;
+    } catch (e) {
+      debugPrint('Move failed: $e');
+      return false;
+    }
+  }// (including the `isValidMove` method, which is correct as is)
   Future<void> resign() async {
     if (_gameId == null) return;
 
@@ -238,25 +365,6 @@ class GameService {
     }
   }
 
-  void _handleGameFinish() {
-    onGameUpdate?.call(GameUpdate(
-      status: 'Game finished',
-      isMyTurn: false,
-      moves: moves,
-      gameOver: true,
-    ));
-    dispose();
-  }
-
-  void _handleChallenge(Map<String, dynamic> challenge) {
-    if (challenge['status'] == 'created') {
-      http.post(
-        Uri.parse('https://lichess.org/api/challenge/${challenge['id']}/decline'),
-        headers: {'Authorization': 'Bearer $accessToken'},
-      );
-    }
-  }
-
   void _handleError(String message) {
     if (!_disposed) {
       onGameUpdate?.call(GameUpdate(
@@ -264,6 +372,7 @@ class GameService {
         isMyTurn: false,
         moves: moves,
         gameOver: true,
+        fen: _chess.fen,
       ));
     }
   }
@@ -274,5 +383,6 @@ class GameService {
     _seekTimeout?.cancel();
     _eventClient?.close();
     _gameClient?.close();
+    print('GameService disposed');
   }
 }
