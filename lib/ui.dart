@@ -62,7 +62,7 @@ class ChessUIScreen extends StatelessWidget {
                         gridButton("Say Lower Diagonal"),
                         gridButton("Say Knight Moves"),
                         gridButton("Say Current Position"),
-                        gridButton("Say All  Board"),
+                        gridButton("Say All Board"),
                         gridButton("Say Machine Move"),
                       ],
                     ),
