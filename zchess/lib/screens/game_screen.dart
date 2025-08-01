@@ -417,7 +417,15 @@ class _GameScreenState extends State<GameScreen> {
                             if (localPosition.dx >= 0 && localPosition.dx < boardSize &&
                                 localPosition.dy >= 0 && localPosition.dy < boardSize) {
 
-                              final int col = (localPosition.dx / squareSize).floor();
+                              // ===================================================================
+                              // ## THE FIX IS HERE ##
+                              // The column calculation now inverts based on player color to match
+                              // the visual orientation of the board.
+                              // ===================================================================
+                              final int col = (_playerColor == PlayerColor.white)
+                                  ? (localPosition.dx / squareSize).floor()
+                                  : (7 - (localPosition.dx / squareSize).floor());
+
                               final int row = (_playerColor == PlayerColor.white)
                                   ? (7 - (localPosition.dy / squareSize).floor())
                                   : (localPosition.dy / squareSize).floor();
