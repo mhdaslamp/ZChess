@@ -142,8 +142,10 @@ class _GameScreenState extends State<GameScreen> {
     }
 
     setState(() {
+      // Case 1: No piece is selected yet
       if (_selectedSquare == null) {
         final piece = _chess.get(square);
+        // Check if the tapped piece belongs to the current player
         if (piece != null &&
             ((_playerColor == PlayerColor.white && piece.color == chess.Color.WHITE) ||
                 (_playerColor == PlayerColor.black && piece.color == chess.Color.BLACK))) {
@@ -153,12 +155,33 @@ class _GameScreenState extends State<GameScreen> {
               .map((move) => move['to'] as String)
               .toList();
         }
-      } else {
+      }
+      // Case 2: A piece is already selected
+      else {
+        // Check if the tapped square is a valid move (which includes captures)
         if (_possibleMoveSquares.contains(square)) {
           _attemptMove(_selectedSquare!, square);
+          _selectedSquare = null;
+          _possibleMoveSquares = [];
         }
-        _selectedSquare = null;
-        _possibleMoveSquares = [];
+        // If the tapped square is not a valid move, check if it's one of your other pieces
+        else {
+          final newPiece = _chess.get(square);
+          if (newPiece != null &&
+              ((_playerColor == PlayerColor.white && newPiece.color == chess.Color.WHITE) ||
+                  (_playerColor == PlayerColor.black && newPiece.color == chess.Color.BLACK))) {
+            // Re-select a new piece
+            _selectedSquare = square;
+            _possibleMoveSquares = _chess.moves({'square': square, 'verbose': true})
+                .whereType<Map<String, dynamic>>()
+                .map((move) => move['to'] as String)
+                .toList();
+          } else {
+            // Deselect the piece if it's an invalid tap (e.g., an empty square or opponent's piece)
+            _selectedSquare = null;
+            _possibleMoveSquares = [];
+          }
+        }
       }
     });
   }
@@ -309,8 +332,13 @@ class _GameScreenState extends State<GameScreen> {
     final int fileIndex = square.codeUnitAt(0) - 'a'.codeUnitAt(0);
     final int rankIndex = int.parse(square[1]) - 1;
 
-    final double left = fileIndex * squareSize;
-    final double top = (_playerColor == PlayerColor.white ? (7 - rankIndex) : rankIndex) * squareSize;
+    // Corrected logic for black player's coordinate inversion
+    final double left = (_playerColor == PlayerColor.white)
+        ? fileIndex * squareSize
+        : (7 - fileIndex) * squareSize;
+    final double top = (_playerColor == PlayerColor.white)
+        ? (7 - rankIndex) * squareSize
+        : rankIndex * squareSize;
 
     return Offset(left, top);
   }
@@ -369,8 +397,10 @@ class _GameScreenState extends State<GameScreen> {
                         top: offset.dy,
                         width: squareSize,
                         height: squareSize,
-                        child: Container(
-                          color: Colors.yellow.withOpacity(0.5),
+                        child: IgnorePointer( // Use IgnorePointer to allow taps to pass through
+                          child: Container(
+                            color: Colors.yellow.withOpacity(0.5),
+                          ),
                         ),
                       ),
                     );
@@ -389,11 +419,14 @@ class _GameScreenState extends State<GameScreen> {
                         top: offset.dy + (isCapture ? 0 : squareSize * 0.35),
                         width: isCapture ? squareSize : squareSize * 0.3,
                         height: isCapture ? squareSize : squareSize * 0.3,
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: isCapture ? Colors.red.withOpacity(0.7) : Colors.blue.withOpacity(0.7),
-                            shape: isCapture ? BoxShape.rectangle : BoxShape.circle,
-                            border: isCapture ? Border.all(color: Colors.red, width: 2.0) : null,
+                        // THIS IS THE FIX: Wrap the highlight in an IgnorePointer
+                        child: IgnorePointer(
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: isCapture ? Colors.red.withOpacity(0.7) : Colors.blue.withOpacity(0.7),
+                              shape: isCapture ? BoxShape.rectangle : BoxShape.circle,
+                              border: isCapture ? Border.all(color: Colors.red, width: 2.0) : null,
+                            ),
                           ),
                         ),
                       ),
@@ -410,18 +443,13 @@ class _GameScreenState extends State<GameScreen> {
                       ),
                       Positioned.fill(
                         child: GestureDetector(
-                          onTapUp: (_isMyTurn && !_gameOver) ? (details) {
+                          onTapUp: (_playerColor != null && _isMyTurn && !_gameOver) ? (details) {
                             final RenderBox renderBox = context.findRenderObject() as RenderBox;
                             final Offset localPosition = renderBox.globalToLocal(details.globalPosition);
 
                             if (localPosition.dx >= 0 && localPosition.dx < boardSize &&
                                 localPosition.dy >= 0 && localPosition.dy < boardSize) {
 
-                              // ===================================================================
-                              // ## THE FIX IS HERE ##
-                              // The column calculation now inverts based on player color to match
-                              // the visual orientation of the board.
-                              // ===================================================================
                               final int col = (_playerColor == PlayerColor.white)
                                   ? (localPosition.dx / squareSize).floor()
                                   : (7 - (localPosition.dx / squareSize).floor());
